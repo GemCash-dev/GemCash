@@ -1,68 +1,152 @@
-contract GemStone is ERC721, Ownable {
+contract GemstoneMine is Ownable {
     using SafeMath for uint256;
-    EnumerableSet.UintSet _toMintGemstones;
-    uint256 public gemsToBeFound;
+    
     address public gemAddress;
-    address public lpAddress;
-    uint256 public gemDifficulty; // Base difficulty for finding Gemstones
-    uint256 public lpDifficulty; // It will be gemDifficulty * (lpSupply / gemInLp) / 8
-    uint256 public startBlock; // need to add modifier started
-    function setGemAddress(address _address) internal{
-        gemAddress = _address;
-        //lpAddress = uniswaplibrary.getPair(weth, gemAddress);
-    }
+    address public gemLPAddress;
+    address public secondTokenAddress; // A new token will be announced.
+    address public secondTokenLPAddress;
     
-    function setStartHeight(uint256 _height) internal{
-        startBlock = _height;
-    }
-    
-    function setDifficulty(uint256 _difficulty) external onlyOwner{
-        gemDifficulty = _difficulty;
-        //lpDifficulty = _difficulty * lpSupply / gemInLP / 8;
-    }
-    
-    function addGemstoneToMine(uint256 _id, uint256 _difficultyMultiplier) internal {
-        // It will add gemstones to the mine to be found by users
+    uint256 public totalAmountGemLPStaked;
+    uint256 public totalAmountSecondaryLPStaked;
+
+    event staked(address _guy, uint256 _amount, address _coin);
+    event unstaked(address _guy, uint256 _amount, address _coin);
+  
+    struct stakeTracker {
+        uint256 lastBlockChecked;
+        uint256 points;
+        uint256 personalGemLPStakedTokens;
+        uint256 personalSecondaryLPStakedTokens;
     }
 
-    function removeFromMineAndMint(uint256 _id, address _newowner) internal{
-        // A gem has been found! It will be removed from the mine and mint to the user.
+    mapping(address => stakeTracker) private _stakedTokens;
+    
+    
+    modifier updateStakingPoints(address account) {
+        if (block.number > _stakedTokens[account].lastBlockChecked) {
+            uint256 rewardBlocks = block.number.sub(_stakedTokens[account].lastBlockChecked);
+            if (_stakedTokens[account].personalGemLPStakedTokens > 0) {//gemLP
+                _stakedTokens[account].points = _stakedTokens[account].points.add(_stakedTokens[account].personalGemLPStakedTokens.mul(rewardBlocks)/_getGemLPDifficulty());
+            }
+            if (_stakedTokens[account].personalSecondaryLPStakedTokens > 0) {//secondTokenLP
+                _stakedTokens[account].points = _stakedTokens[account].points.add(_stakedTokens[account].personalSecondaryLPStakedTokens.mul(rewardBlocks)/_getSecondTokenLPDifficulty());
+            } 
+            _stakedTokens[account].lastBlockChecked = block.number;   
+        }
+        _;
+    }
+
+    function getStakedGemLPBalanceFrom(address _address) view public returns(uint256){
+        return _stakedTokens[_address].personalGemLPStakedTokens;
     }
     
-    function stakeGem() external{
-        // Stake your GEM in the gemstone mine contract
-    }
-    function stakeGemLP() external{
-        // Stake your LP in the gemstone mine contract
+    function getStakedSecondaryLPBalanceFrom(address _address) view public returns(uint256){
+        return _stakedTokens[_address].personalSecondaryLPStakedTokens;
     }
     
-    function unstakeGem() external{
-        // Claim NFTs and unstake your GEM from the gemstone mine contract
+    function getLastBlockFrom(address _address) view public returns(uint256){
+        return _stakedTokens[_address].lastBlockChecked;
     }
     
-    function unstakeLP() external{
-        // Claim NFTs and unstake your LPs from the gemstone mine contract
+    function getLastPoints(address _address) view public returns(uint256){
+        return _stakedTokens[_address].points;
     }
-    function claimLotteryGem() external{
-        //gemLPStaked, gemStaked and difficulties will be used to attemp mining all gemstones in the mine.
-        //The more tokens staked and time spent from last time user claimed the more chances the user will have to mine one precious gemstones from the mine
-        //blockhash will be used as seed
+    
+    
+    
+    address public constant WETH = address(0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2);
+    address public constant uniswapV2Factory = address(0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f);
+
+    // address public lpAddress; calculate using library
+    function _getLPAddress(address token0, address token1) internal pure returns (address){
+        return UniswapV2Library.pairFor(uniswapV2Factory, token0, token1);
     }
-    constructor(
-    )
-    public
-    Ownable()
-    ERC721("gem.cash", "GEM"){
-        /*
-        gemDifficulty = ???;
-        setGemAddress(gemAddress);
-        addGemstoneToMine(ruby);
-        addGemstoneToMine(amber);
-        addGemstoneToMine(onix);
-        addGemstoneToMine(amethyst);
-        addGemstoneToMine(emerald);
-        addGemstoneToMine(sapphire);
-        setStartHeight(height);
-        */
+    
+    //function will be called after user claims (ownership will be transfered)
+    function _resetPoints(address _address) external onlyOwner{
+        _stakedTokens[_address].points = 0;
+    }
+    
+    //calculate points before claiming
+    function _updatePoints(address _address) external updateStakingPoints(_address) onlyOwner{
+    }
+    
+    uint256 public gemDifficulty; // Base difficulty
+    uint256 public gemScale;
+    uint256 public secondTokenDifficulty;// Secondary token will be announced
+    uint256 public secondTokenScale;
+
+    IERC20 private gemToken;
+    IERC20 private gemTokenLP;
+    IERC20 private secondToken;
+    IERC20 private secondTokenLP;
+    
+    function _getGemLPDifficulty() public view returns (uint256){
+        return gemDifficulty.mul((totalAmountGemLPStaked+gemScale)/gemScale);
+    }
+    
+    function _getSecondTokenLPDifficulty() public view returns (uint256){
+        return secondTokenDifficulty.mul((totalAmountSecondaryLPStaked+secondTokenScale)/secondTokenScale);
+    }
+    
+    function setGemAddress(address _address) public onlyOwner {
+        gemAddress = _address;
+        gemLPAddress = _getLPAddress(gemAddress, WETH);
+        gemToken = IERC20(gemAddress);
+        gemTokenLP = IERC20(gemLPAddress);
+    }
+    
+    function setSecondTokenAddress(address _address) public onlyOwner{
+        secondTokenAddress = _address;
+        secondTokenLPAddress = _getLPAddress(secondTokenAddress, WETH);
+        secondToken = IERC20(secondTokenAddress);
+        secondTokenLP = IERC20(secondTokenLPAddress);
+    }
+    
+    
+    function setGemDifficulty(uint256 _difficulty, uint256 _scale) public onlyOwner{
+        gemDifficulty = _difficulty;
+        gemScale = _scale;
+    }
+
+    
+    function setSecondTokenDifficulty(uint256 _difficulty, uint256 _scale) public onlyOwner{
+        secondTokenDifficulty = _difficulty;
+        secondTokenScale = _scale;
+    }
+    
+    constructor() public {
+        setGemDifficulty(4, 10**18);
+        setGemAddress(0x8Df3872D7071076012173c2442272dbA7f9acB23);
+    }
+
+    function stakeGemLP(uint256 amount) external updateStakingPoints(msg.sender) {
+        require(gemTokenLP.transferFrom(msg.sender, address(this), amount), "can't stake");
+        totalAmountGemLPStaked = totalAmountGemLPStaked.add(amount);
+        _stakedTokens[msg.sender].personalGemLPStakedTokens = _stakedTokens[msg.sender].personalGemLPStakedTokens.add(amount);
+        emit staked(msg.sender, amount, gemLPAddress);
+    }
+    
+    function stakeSecondTokenLP(uint256 amount) external updateStakingPoints(msg.sender) {
+        require(secondTokenLP.transferFrom(msg.sender, address(this), amount), "can't stake");
+        totalAmountSecondaryLPStaked = totalAmountSecondaryLPStaked.add(amount);
+        _stakedTokens[msg.sender].personalSecondaryLPStakedTokens = _stakedTokens[msg.sender].personalSecondaryLPStakedTokens.add(amount);
+        emit staked(msg.sender, amount, secondTokenLPAddress);
+    }
+    
+    function unStakeGemLP(uint256 amount) external updateStakingPoints(msg.sender) {
+        require(_stakedTokens[msg.sender].personalGemLPStakedTokens >= amount, "cant unstake");
+        totalAmountGemLPStaked = totalAmountGemLPStaked.sub(amount);
+        _stakedTokens[msg.sender].personalGemLPStakedTokens = _stakedTokens[msg.sender].personalGemLPStakedTokens.sub(amount);
+        gemTokenLP.transfer(msg.sender, amount);
+        emit unstaked(msg.sender, amount, gemLPAddress);
+    }
+    
+    function unStakeSecondTokenLP(uint256 amount) external updateStakingPoints(msg.sender) {
+        require(_stakedTokens[msg.sender].personalSecondaryLPStakedTokens >= amount, "cant unstake");
+        totalAmountSecondaryLPStaked = totalAmountSecondaryLPStaked.sub(amount);
+        _stakedTokens[msg.sender].personalSecondaryLPStakedTokens = _stakedTokens[msg.sender].personalSecondaryLPStakedTokens.sub(amount);
+        secondTokenLP.transfer(msg.sender, amount);
+        emit unstaked(msg.sender, amount, secondTokenLPAddress);
     }
 }
